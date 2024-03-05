@@ -1,0 +1,97 @@
+\section{Linear Transformers}
+\subsection{Theoretical Description}
+We follow the theoretical derivations of \cite{katharopoulos2020transformers}. Let $x \in \mathbb{R}^{N \times F}$ be our input (sequence length $N$ and $F$ features). A transformer layer is a function $T \colon \mathbb{R}^{N \times F} \to \mathbb{R}^{N \times F}$ such that 
+\begin{gather*}
+     Q = xW_Q, K = xW_K, V = xW_V \\
+    A(x) = softmax(QK^\top / \sqrt{D}) V \\
+    T(x) = f(A(x) + x)
+\end{gather*}
+for $f$ a feature-independent FFN and projection matrices $W_Q, W_K \in \mathbb{R}^{F \times D}$, $W_V \in\mathbb{R}^{F \times M}$.
+
+If we analyze the complexity of such transformer layer, we notice that the only computation with $O(N^2)$ complexity w.r.t $N$ is the attention layer $A(x)$ with computational complexity $O(N^2(M + D))$ and $O(N^2)$ requirement due to storing $QK^\top$.
+
+To remediate this, a kernalization method is used. Consider a feature map $\phi : \mathbb{R}^D \to \mathbb{R}^C$ (deterministic or not) such that $\exp(\frac{q^\top k}{\sqrt{D}}) \approx \phi(q)^\top \phi(k)$, then we get
+\begin{equation}
+\label{approx}
+    (A(x))_i = \cfrac{\sum_{j=1}^N \exp(Q_i^\top K_j/ \sqrt{D}) V_j}{\sum_{j=1}^N \exp(Q_i^\top K_j / \sqrt{D})} \approx \cfrac{\sum_{j=1}^N \phi(Q_i)^T \phi(K_j) V_j}{\sum_{j=1}^N \phi(Q_i)^\top \phi(K_j)} = \cfrac{\phi(Q_i)^\top \sum_{j=1}^N \phi(K_j)V_j}{\phi(Q_i)^\top \sum_{j=1}^N \phi(K_j)}
+\end{equation}
+Therefore, $A(x) \approx \phi(Q) (\phi(K)^\top V) / \phi(Q) (\phi(K)^\top 1_N)$ where the division is row-wise and $1_N \in \mathbb{R}^N$ is the vector with all ones. Note that we can compute in $O(NCM)$ operations through the parenthesis indicated precedence. This yields $O(N(C+M))$ memory requirement. 
+
+For the causal masked self-attention variation, we slightly modify \ref{approx} to get
+\begin{equation}
+    (A(x))_i \approx \cfrac{\phi(Q_i)^\top \sum_{j=1}^i \phi(K_j)V_j}{\phi(Q_i)^\top \sum_{j=1}^i \phi(K_j)} = \cfrac{\phi(Q_i)^\top S_i}{\phi(Q_i)^\top Z_i}
+\end{equation}
+hence, if we define $S_i := \sum_{j=1}^i \phi(K_j)V_j, Z_i := \sum_{j=1}^i \phi(K_j)$, we can compute $(A(x))_i$ via partial sums in constant operations relative to $N$. Notice that this approach establishes a parallel between linear causal attention and RNNs.
+
+Finally, we can compute the gradients of these approximate linear causal attentions also in linear time and memory with similar partial sums to $S_i, Z_i$. In particular, with the custom gradient computation instead of the auto-grad, we avoid tracking all the $S_i, Z_i$, and instead only using $Q, K, V$. 
+
+The main question that remains is: How to design the feature map to approximate the desired $\sigma$.
+
+\subsection{Paper-specific approaches}
+
+In Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention\cite{katharopoulos2020transformers}, the paper that described the derivations done above, the authors consider a simple feature map $\phi(x) = elu(x) + 1$ due to ease of computation, positiveness, and favorable gradient properties.
+
+\vspace{1em}
+ 
+Random Feature Attention \cite{peng2021random} proposes a randomized feature function 
+$$
+\phi(x) = \sqrt{1/L} \Bigl[ \sin(w_1 \cdot x), \ldots, \sin(w_L \cdot x), \cos(w_1 \cdot x), \ldots \cos(w_L \cdot x) \Bigr]^\top
+$$
+for $D$-dimensional random vectors $w_i \sim \mathcal{N}(0, \lambda^2 I_L) $. The motivation comes from $\mathbb{E}[\phi(x)^T \phi(y)] = \exp(- \| x - y \|^2 / 2\lambda^2)$ so if we normalize the queries and keys to unit vectors, we get $\exp(q^\top k /\lambda^2) \propto \phi(q)^\top \phi(k) $ (in expectation).
+
+Moreover, it also introduces a gating mechanism inspired by RNN's to the causal attention scenario with the goal of learning with recency bias.
+
+\vspace{1em}
+
+Rethinking Attention with Performers \cite{choromanski2022rethinking}, on the other hand, proposes another two random feature functions $$\phi_1(x) = \exp(-\|x\|^2/2)(\exp(w_1 \cdot x) + \ldots \exp(w_m \cdot x))$$  $$\phi_2(x) = \frac{1}{\sqrt{2}}\exp(-\|x\|^2/2)(\sum_{i=1}^m \exp(w_i \cdot x) + \exp(-w_i \cdot x))$$ with $w_i$ being sampled either from $\mathcal{N}(0, I_D)$ or to a uniform distribution over the sphere of radius $\sqrt{D}$ in $\mathbb{R}^D$. Additionally, the authors propose to entangle the random samples $(w_i)_1^m$ to be orthogonal for variance reduction. Finally, substituting $\exp$ by $ReLU$ in the equations above also yields good results empirically.
+
+These methods are all proved to approximate the softmax attention mechanism and in comparison with the feature function suggested by \cite{peng2021random}, these provide more desirable numerical properties due to positivity everywhere, which results in more stable and strong performance in selected benchmarks.
+
+\vspace{1em}
+
+Linear Transformers are Secretly Fast Weight Programmers \cite{schlag2021linear} proposes a deterministic feature function to address the variance introduced by the random sampling of the models cited before. It then introduces $\phi$ defined by concatenating \begin{equation}\label{FWP}\phi_{i, v}(k) = ReLU([k, -k]^\top)_i ReLU([k, -k]^\top)_{i + v}\end{equation} for $i \in [1, 2D]$, $v \in [1, \nu]$ (indices taken modulo $2D$).
+
+Moreover, it also introduces a modified update rule for the causal attention partial sums as done on \ref{approx}, a "memory gating mechanism", that empirically shows improvements not only for the author's choice of kernel, but also for RFA\cite{peng2021random} and Performers\cite{choromanski2022rethinking}.
+
+\vspace{1em}
+EcoFormer: Energy-Saving Attention with Linear Complexity \cite{liu2023ecoformer} introduces yet another approach to the kernalization by using a learnable binary hash function $\phi(x) \in \{-1, 1\}^b$. With the $b$-bit binary representation, the expensive floating point multiplications and accumulations can be expressed as fast bit-wise operations. This hash function is obtained via self-supervised learning to preserve the relationship information between queries and keys.
+
+\section{RWKV: Reinventing RNNs for the Transformer Era \cite{Peng2023}}
+
+The authors of RWKV have an alternative formulation for linear attention transformers, although it is also motivated by RNNs.
+
+Inspired by \cite{Zhai2021}, the authors opt for an alternative formulation of attention as
+$$
+    \text{Attn}^+ (W, K, V)_t = \frac{\sum_{i=1}^t \exp(w_{t, i} + k_i) \odot v_i}{\sum_{i=1}^t \exp(w_{t, i} + k_i)}
+$$
+with $w_{t, i} = -(t - i - 1)w$ for $i \leq t - 1$ and $w_{t, t} = u$, where $w$ represents a positional weight decay ($w \in \mathbb{R}_{\geq 0}^d$) and $u$ is a separate vector that attends exclusively to the current token. Heuristically, by replacing $Q$ by $W$, we establish a linear measure "similarity".
+
+From that, the authors define two sub-blocks of the RWVK block:
+\begin{itemize}
+    \item \textbf{Time Mix Block:} This block is analogous to the attention block of vanilla Transformers. It can be expressed by 
+    \begin{align*}
+        r_t &= W_r \cdot (\mu_r \odot x_t + (1 - \mu_r) \odot x_{t-1}), \\ 
+        k_t &= W_k \cdot (\mu_k \odot x_t + (1 - \mu_k) \odot x_{t-1}), \\ 
+        v_t &= W_v \cdot (\mu_v \odot x_t + (1 - \mu_v) \odot x_{t-1}), \\ 
+        o_t &= W_i \cdot (\sigma(r_t) \odot \text{Attn}^+ (W, K, V)_t),
+    \end{align*}
+    where $x_t$ is the input after a layer normalization of the block, and $x_{t-1}$ is the respective input of the previous layer.
+    Notice that in these equations are roughly equivalent to an LSTM with an attention mechanism added.
+    \item \textbf{Channel Mixing Block:} This block is analogous to the FFN block of vanilla Transformers. It can be expressed by:
+    \begin{align*}
+        r'_t &= W_{r'} \cdot (\mu_{r'} \odot y_t + (1 - \mu_{r'}) \odot y_{t-1}), \\ 
+        k'_t &= W_{k'} \cdot (\mu_{k'} \odot y_t + (1 - \mu_{k'}) \odot y_{t-1}), \\ 
+        o'_t &= \sigma(r'_t) \odot (W'_v \cdot \max(k'_t, 0)^2).
+    \end{align*}
+\end{itemize}
+
+These two mechanisms combined allow for
+\begin{itemize}
+    \item Transformers-like parallelizable training.
+    \item RNN-like inference, due to the recursive structure to compute state $t$ based on state $t-1$ without redundant computations.
+    \item Linear computational and memory complexity of  $O(NF^2), O(NF)$, respectively. (where input $x \in \mathbb{R}^{N \times F})$.
+\end{itemize}
+
+Although this approach needs more testing, on the experiments included by the authors the results are much more promising than all methods included above. In fact, it beats vanilla transformers in most of them.
+
+Notice that it still has some of the problems of other linear transformers, most importantly the information bottleneck due to linearity.
