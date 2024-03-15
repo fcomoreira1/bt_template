@@ -1,72 +1,115 @@
-\section{Linear Transformers}
-\subsection{Theoretical Description}
-We follow the theoretical derivations of \cite{katharopoulos2020transformers}. Let $x \in \mathbb{R}^{N \times F}$ be our input (sequence length $N$ and $F$ features). A transformer layer is a function $T \colon \mathbb{R}^{N \times F} \to \mathbb{R}^{N \times F}$ such that 
-\begin{gather*}
-     Q = xW_Q, K = xW_K, V = xW_V \\
-    A(x) = softmax(QK^\top / \sqrt{D}) V \\
-    T(x) = f(A(x) + x)
-\end{gather*}
-for $f$ a feature-independent FFN and projection matrices $W_Q, W_K \in \mathbb{R}^{F \times D}$, $W_V \in\mathbb{R}^{F \times M}$.
+\section{Linear Attention Transformers}
 
-If we analyze the complexity of such transformer layer, we notice that the only computation with $O(N^2)$ complexity w.r.t $N$ is the attention layer $A(x)$ with computational complexity $O(N^2(M + D))$ and $O(N^2)$ requirement due to storing $QK^\top$.
+One of the popular methods to improve the efficiency of Transformer-based architectures is to use kernels to rewrite the attention mechanism and avoid explicit computation of the attention matrix $\softmax(QK^\top / \sqrt{d_k})$, which has quadratic cost in memory and computations with respect to $L$. This has been explored by several authors, some concurrently, but the general framework can be established as below.
 
-To remediate this, a kernalization method is used. Consider a feature map $\phi : \mathbb{R}^D \to \mathbb{R}^C$ (deterministic or not) such that $\exp(\frac{q^\top k}{\sqrt{D}}) \approx \phi(q)^\top \phi(k)$, then we get
+\subsection{General Framework}
+Here we will present a general mathematical formulation that can be used as a base to describe the many paper-specific approaches for this method. For these derivations, we consider subscripts such as $B_k$ to be the $n$-th row of matrix $B$ in column form, as it is convention in the Machine Learning community. We will use the same notation and dimensionalities as section \ref{sec:transformers}.
+
+To personalize the attention matrix, we consider a feature map $\phi \colon \mathbb{R}^{d_k} \to \mathbb{R}^c$. We assume $\exp(Q_i^\top K_j / \sqrt{d_k}) \approx \phi(K_j)^\top \phi(Q_i)$ for the kernel-trick, however this is not always satisfied by the propositions below. Now, let $A$ be the resulting matrix of self-attention, then it follows that
+
 \begin{equation}
-\label{approx}
-    (A(x))_i = \cfrac{\sum_{j=1}^N \exp(Q_i^\top K_j/ \sqrt{D}) V_j}{\sum_{j=1}^N \exp(Q_i^\top K_j / \sqrt{D})} \approx \cfrac{\sum_{j=1}^N \phi(Q_i)^T \phi(K_j) V_j}{\sum_{j=1}^N \phi(Q_i)^\top \phi(K_j)} = \cfrac{\phi(Q_i)^\top \sum_{j=1}^N \phi(K_j)V_j}{\phi(Q_i)^\top \sum_{j=1}^N \phi(K_j)}
+\label{eq:approx}
+    \begin{split}
+        A_i &:= \left(\softmax \left( \cfrac{QK^\top}{\sqrt{d_k}} \right)V\right)_i = \cfrac{\sum_{j=1}^N \exp(Q_i^\top K_j/ \sqrt{D}) V_j}{\sum_{j=1}^N \exp(Q_i^\top K_j / \sqrt{D})} \\ 
+        &\approx \cfrac{\sum_{j=1}^N  V_j \phi(K_j)^T \phi(Q_j)}{\sum_{j=1}^N \phi(K_j)^\top \phi(Q_i)} 
+        = \cfrac{(\sum_{j=1}^N V_j \phi(K_j)^\top)\phi(Q_i)}{(\sum_{j=1}^N \phi(K_j)^\top)\phi(Q_i)},
+    \end{split}
 \end{equation}
-Therefore, $A(x) \approx \phi(Q) (\phi(K)^\top V) / \phi(Q) (\phi(K)^\top 1_N)$ where the division is row-wise and $1_N \in \mathbb{R}^N$ is the vector with all ones. Note that we can compute in $O(NCM)$ operations through the parenthesis indicated precedence. This yields $O(N(C+M))$ memory requirement. 
+therefore, rewriting in matrix multiplication form after transposing the column form to rows we get
+$$A \approx (\phi(Q) (\phi(K)^\top 1_L))^{-1} \phi(Q) (\phi(K)^\top V),$$ 
+where $1_L \in \mathbb{R}^L$ is the vector with all entries equal to one. Note that if we follow the precedence indicated by the parenthesis, we can compute it in $O(Lcd_k)$ operations and $O(L(c+d_k))$ memory, thus removing the quadratic term of both computational and memory complexity on running the self-attention mechanism.
 
-For the causal masked self-attention variation, we slightly modify \ref{approx} to get
+\vspace{0.5em}
+This handles the problem of self-attention, however, we can slightly modify eq. (\ref{eq:approx}) and obtain a similar approximation for the masked self-attention mechanism. For masked self-attention, the future positions must be masked before the application of the softmax, which is equivalent to setting the entries to $0$ post softmax application, i.e., considering only the lower-triangular part of the softmax output. With this, we can similarly obtain:
+
 \begin{equation}
-    (A(x))_i \approx \cfrac{\phi(Q_i)^\top \sum_{j=1}^i \phi(K_j)V_j}{\phi(Q_i)^\top \sum_{j=1}^i \phi(K_j)} = \cfrac{\phi(Q_i)^\top S_i}{\phi(Q_i)^\top Z_i}
+    A_i \approx \cfrac{ (\sum_{j=1}^i V_j\phi(K_j)^\top)\phi(Q_i)}{(\sum_{j=1}^i \phi(K_j)^\top)\phi(Q_i)}, 
 \end{equation}
-hence, if we define $S_i := \sum_{j=1}^i \phi(K_j)V_j, Z_i := \sum_{j=1}^i \phi(K_j)$, we can compute $(A(x))_i$ via partial sums in constant operations relative to $N$. Notice that this approach establishes a parallel between linear causal attention and RNNs.
+hence, if we define $S_i := \sum_{j=1}^i V_j\phi(K_j)^\top , Z_i := \sum_{j=1}^i \phi(K_j)^\top,$ we can compute $A$ via partial sums as
+\begin{equation}
+\label{eq:masked-linear}
+    A_i = \cfrac{S_i\phi(Q_i)}{Z_i \phi(Q_i)}.
+\end{equation}
 
-Finally, we can compute the gradients of these approximate linear causal attentions also in linear time and memory with similar partial sums to $S_i, Z_i$. In particular, with the custom gradient computation instead of the auto-grad, we avoid tracking all the $S_i, Z_i$, and instead only using $Q, K, V$. 
+This establishes not only that we can compute each $A_i$ with a constant number of operations (not a function of $L$) through the recursive definition of $S_i$ and $Z_i$, but also a parallel between linear masked self-attention and recurrent networks.
 
-The main question that remains is: How to design the feature map to approximate the desired $\sigma$.
+\vspace{0.5em}
 
-\subsection{Paper-specific approaches}
-
-In Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention\cite{katharopoulos2020transformers}, the paper that described the derivations done above, the authors consider a simple feature map $\phi(x) = elu(x) + 1$ due to ease of computation, positiveness, and favorable gradient properties.
-
-\vspace{1em}
- 
-Random Feature Attention \cite{peng2021random} proposes a randomized feature function 
-$$
-\phi(x) = \sqrt{1/L} \Bigl[ \sin(w_1 \cdot x), \ldots, \sin(w_L \cdot x), \cos(w_1 \cdot x), \ldots \cos(w_L \cdot x) \Bigr]^\top
-$$
-for $D$-dimensional random vectors $w_i \sim \mathcal{N}(0, \lambda^2 I_L) $. The motivation comes from $\mathbb{E}[\phi(x)^T \phi(y)] = \exp(- \| x - y \|^2 / 2\lambda^2)$ so if we normalize the queries and keys to unit vectors, we get $\exp(q^\top k /\lambda^2) \propto \phi(q)^\top \phi(k) $ (in expectation).
-
-Moreover, it also introduces a gating mechanism inspired by RNN's to the causal attention scenario with the goal of learning with recency bias.
+Finally, for practical purposes, we can also compute the gradients of the masked attention in linear time and memory with respect to $L$ with similar partial sums. A custom CUDA kernel is implemented by \cite{katharopoulos2020transformers} for this gradient computation, as the auto-grad would track all the partial $S_i$ and $Z_i$.
 
 \vspace{1em}
+The main question that remains is: How to design the feature map.
 
-Rethinking Attention with Performers \cite{choromanski2022rethinking}, on the other hand, proposes another two random feature functions $$\phi_1(x) = \exp(-\|x\|^2/2)(\exp(w_1 \cdot x) + \ldots \exp(w_m \cdot x))$$  $$\phi_2(x) = \frac{1}{\sqrt{2}}\exp(-\|x\|^2/2)(\sum_{i=1}^m \exp(w_i \cdot x) + \exp(-w_i \cdot x))$$ with $w_i$ being sampled either from $\mathcal{N}(0, I_D)$ or to a uniform distribution over the sphere of radius $\sqrt{D}$ in $\mathbb{R}^D$. Additionally, the authors propose to entangle the random samples $(w_i)_1^m$ to be orthogonal for variance reduction. Finally, substituting $\exp$ by $ReLU$ in the equations above also yields good results empirically.
+\subsection{Prominent Adaptations}
 
-These methods are all proved to approximate the softmax attention mechanism and in comparison with the feature function suggested by \cite{peng2021random}, these provide more desirable numerical properties due to positivity everywhere, which results in more stable and strong performance in selected benchmarks.
+To my knowledge, the first attempt to use Linear Attention Transformers was proposed by \cite{katharopoulos2020transformers}, which they called Linear Transformers. The authors opt for a simple feature map $\phi(x) = \text{elu}(x) + 1$, where $\text{elu}$ \cite{clevert2016elu} is defined as $x \mapsto x$ if $x \geq 0$ and $\alpha (e^x - 1)$ otherwise. Notice that the kernel induced by this map does not approximate the exponential function, however, it was chosen due to ease of computation, positiveness everywhere, and favorable gradient properties as established by \cite{clevert2016elu}. Moreover, this feature map fixes $c = d_k$, which prevents a higher dimension embedding that can compensate for the lower representation capability of a kernelized approximation to the attention matrix. Indeed, the main contribution of this paper came in designing linear attention alongside expressing linear attention decoding as a recurrent neural network, which allowed for linear complexity autoregressive inference.
 
 \vspace{1em}
 
-Linear Transformers are Secretly Fast Weight Programmers \cite{schlag2021linear} proposes a deterministic feature function to address the variance introduced by the random sampling of the models cited before. It then introduces $\phi$ defined by concatenating \begin{equation}\label{FWP}\phi_{i, v}(k) = ReLU([k, -k]^\top)_i ReLU([k, -k]^\top)_{i + v}\end{equation} for $i \in [1, 2D]$, $v \in [1, \nu]$ (indices taken modulo $2D$).
+ The authors of Random Feature Attention (RFA) \cite{peng2021random} on the other hand propose a more sophisticated map that has a closer relation to the original function.  They do so by first replacing the $\sqrt{d_k}$ term on the denominator of the softmax with a learnable parameter $\sigma$ and rewriting 
+ \begin{equation}
+ \label{eq:exp-rewrite}
+     \exp\left(x^\top y / \sigma^2 \right) = \exp\left(\|x\|/2\sigma^2 + \|y\|/2\sigma^2\right) \exp\left(-\|x - y\|/2\sigma^2\right)
+ \end{equation}
+ so through by normalizing the keys and queries to a fixed norm, they can turn the attention on approximating $\exp\left(-\|x - y\|/\sigma^2\right)$ instead. For that, they propose the randomized map
+\begin{equation}
+\label{eq:rfa}
+\phi(x) = \sqrt{1/D} \Bigl[ \sin(w_1 \cdot x), \ldots, \sin(w_D \cdot x), \cos(w_1 \cdot x), \ldots \cos(w_D \cdot x) \Bigr]^\top
+\end{equation}
+for $d_k$-dimensional random vectors $w_i \sim \mathcal{N}(0, \sigma^2 I_{d_k}) $ and hyperparameter $D$ ($c = 2D$). Indeed, $\mathbb{E}[\phi(x) \phi(y)^T] = \exp(- \| x - y \|^2 / 2\sigma^2)$ and the variance of this estimation is inversely proportional to $D$ as established by \cite{yu2016orthogonal}. Therefore we can establish that $\exp\left(x^\top y / \sigma^2\right) \approxprop \phi(x)\phi(y)^\top$.
 
-Moreover, it also introduces a modified update rule for the causal attention partial sums as done on \ref{approx}, a "memory gating mechanism", that empirically shows improvements not only for the author's choice of kernel, but also for RFA\cite{peng2021random} and Performers\cite{choromanski2022rethinking}.
+Moreover, RFA also entails a gating mechanism to the architecture. Although this was proposed to induce a locality bias to the model, this also tackles a key issue with linear attention, the information bottleneck created when approximating the attention matrix. Indeed, a gating mechanism allows the network to selectively drop associations as new associations are added to the limited representation capability of the factorization presented in eq. (\ref{eq:approx}). This is naturally implemented by adding an LSTM-like \cite{10.1162/neco.1997.9.8.1735} learned gating mechanism in eq. (\ref{eq:masked-linear})
 
 \vspace{1em}
-EcoFormer: Energy-Saving Attention with Linear Complexity \cite{liu2023ecoformer} introduces yet another approach to the kernalization by using a learnable binary hash function $\phi(x) \in \{-1, 1\}^b$. With the $b$-bit binary representation, the expensive floating point multiplications and accumulations can be expressed as fast bit-wise operations. This hash function is obtained via self-supervised learning to preserve the relationship information between queries and keys.
 
-\section{RWKV: Reinventing RNNs for the Transformer Era \cite{Peng2023}}
+Another approach that is very similar to RFA is Performers \cite{choromanski2022rethinking}. It proposes mainly two feature functions that also approximate based on eq. (\ref{eq:exp-rewrite})
+\begin{equation}
+\label{eq:performers}
+    \begin{split}
+        \phi_1(x)&= \exp(-\|x\|^2/2)(\exp(w_1 \cdot x) + \ldots + \exp(w_m \cdot x)) \\
+        \phi_2(x)&= \frac{1}{\sqrt{2}}\exp(-\|x\|^2/2)(\sum_{i=1}^m \exp(w_i \cdot x) + \exp(-w_i \cdot x))
+    \end{split}
+\end{equation} 
+with $w_i$ being sampled either from $\mathcal{N}(0, I_{d_k})$ or to a uniform distribution over the sphere of radius $\sqrt{d_k}$ in $\mathbb{R}^d_k$. The key differences to RFA are the positiveness of the entries of the map, helping with numerical stability on the denominator of eq. (\ref{eq:approx}) and
+that there is no need to normalize the keys and queries. The authors of Performers thoroughly compare the behavior of the sin-cos kernel (\ref{eq:rfa}) with the positive kernels (\ref{eq:performers}), and the latter shows better theoretical and practical properties. Additionally, the authors propose to entangle the random samples $(w_i)_1^m$ to be orthogonal for variance reduction. 
 
-The authors of RWKV have an alternative formulation for linear attention transformers, although it is also motivated by RNNs.
+It is worth remarking that both the positive kernels and the orthogonal random features come with theoretical guarantees of approximation to the Softmax activation, which is also validated empirically in some sample tests by comparison with Vanilla Transformers. This enables this approach to resume training from a Transformer with full attention, which shows promising results in practice. Finally, substituting $\exp$ by $\relu$ in the equations above also yields good results empirically, which will be a trend explored by the next approach.
 
-Inspired by \cite{Zhai2021}, the authors opt for an alternative formulation of attention as
+\vspace{1em}
+
+Linear Transformers are Secretly Fast Weight Programmers \cite{schlag2021linear} proposes a deterministic feature function to address the variance introduced by the random sampling of the models cited before. They name their method DPFP. It introduces $\phi$ defined by concatenating 
+\begin{equation}
+\label{eq:FWP}\phi_{i, v}(x) = \relu([x, -x]^\top)_i \relu([x, -x]^\top)_{i + v}
+\end{equation} 
+for $i \in [1, 2d_k]$, $v \in [1, \nu]$ (indices taken modulo $2d_k$). This keeps the simplicity of computing the elu-based map while providing the ability to project the inputs to higher dimensions.
+
+Moreover, its key contribution lies in the modified update rule for the causal attention sums, similar to the gating mechanism proposed by RFA. It also introduces a recency bias and provides an even more robust mechanism for the selection of associations stored. It can be described with a modification to eq. (\ref{eq:masked-linear}) as
+\begin{align*}
+	\overline{V_i} &= \frac{S_{i-1} \phi(K_i)}{Z_{i-1} \phi(K_i)},  \\
+	\beta_i &= \sigma(W_\beta x_i), \\
+	(V_{new})_i &= \beta_i V_i + (1 - \beta_i) \overline{V_i}, \\
+	S_i &= S_{i-1} + ((V_{new})_i - \overline{V_i})\phi(K_j)^\top, \\
+	A_i &= \frac{S_i \phi(Q_i)}{Z_i \phi(Q_i)}, 
+\end{align*}
+with $\sigma$ being a sigmoid function, $\beta$ representing a gating parameter, and the update rule for $Z_i$ staying unchanged. Conceptually, we view $S_i$ as the memory matrix, and through the added mechanism we selectively update the memory by balancing previous information with the incoming. 
+
+The efficiency of this mechanism is asserted independently of the authors' choice of kernel, showing promising results in selected benchmarks also when used alongside the kernels of RFA and Performers.
+
+
+\vspace{1em}
+EcoFormer\cite{liu2023ecoformer} is yet another approach to the kernalization by using a learnable binary hash function $\phi(x) \in \{-1, 1\}^b$. With the binary hash map, the expensive float point operations (FLOPS), in particular multiplications, can substituted by efficient bit-shift operations, resulting not only in better performance but also in a drastic reduction of energy consumption. 
+
+The binary hash map is learned through self-supervised learning given a random sub-sample of the queries. The learning objective is to minimize the Frobenius norm of the approximated $\phi(Q)\phi(Q)^\top$ and a target affinity matrix $Y$ whose entries are $b$ for the pairs with higher attention scores, $-b$ for the ones with lower attention scores, and $0$ otherwise. This target is made so that the hash function is made to preserve the similarity representation of self-attention.
+
+\vspace{1em}
+
+With a slightly different formulation of attention, but similar ideas, RMVW \cite{Peng2023} is a more recent approach to linear complexity transformers. Once again, it heavily takes influence from techniques similar to RNNs. Indeed, it is an attempt to leverage the advantages of both RNNs and Transformers in a single architecture. Inspired by \cite{Zhai2021}, the authors don't approximate $\exp(q^\top k)$, but rather the argument of the exponential, resulting in
 $$
     \text{Attn}^+ (W, K, V)_t = \frac{\sum_{i=1}^t \exp(w_{t, i} + k_i) \odot v_i}{\sum_{i=1}^t \exp(w_{t, i} + k_i)}
 $$
-with $w_{t, i} = -(t - i - 1)w$ for $i \leq t - 1$ and $w_{t, t} = u$, where $w$ represents a positional weight decay ($w \in \mathbb{R}_{\geq 0}^d$) and $u$ is a separate vector that attends exclusively to the current token. Heuristically, by replacing $Q$ by $W$, we establish a linear measure "similarity".
+with $w_{t, i} = -(t - i - 1)w$ for $i \leq t - 1$ and $w_{t, t} = u$, where $w$ represents a positional weight decay ($w \in \mathbb{R}_{\geq 0}^d$) and $u$ is a separate vector that attends exclusively to the current token. Heuristically, by replacing $Q$ with $W$, we establish a linear measure for similarity.
 
-From that, the authors define two sub-blocks of the RWVK block:
+The authors go beyond adapting just the attention matrix, but propose a major redesign of the architecture as follows ($\cdot$ is the Hadarmard product):
 \begin{itemize}
     \item \textbf{Time Mix Block:} This block is analogous to the attention block of vanilla Transformers. It can be expressed by 
     \begin{align*}
@@ -85,13 +128,40 @@ From that, the authors define two sub-blocks of the RWVK block:
     \end{align*}
 \end{itemize}
 
-These two mechanisms combined allow for
-\begin{itemize}
-    \item Transformers-like parallelizable training.
-    \item RNN-like inference, due to the recursive structure to compute state $t$ based on state $t-1$ without redundant computations.
-    \item Linear computational and memory complexity of  $O(NF^2), O(NF)$, respectively. (where input $x \in \mathbb{R}^{N \times F})$.
-\end{itemize}
+These two mechanisms combined allow for Transformers-like parallelizable training with RNN-like inference
+due to the recursive structure to compute state $t$ based on state $t-1$ without redundant computations. Moreover, this yields linear computational and memory complexity based on $L$ (the same as linear attention transformers).
 
-Although this approach needs more testing, on the experiments included by the authors the results are much more promising than all methods included above. In fact, it beats vanilla transformers in most of them.
+\subsection{Benchmarks}
 
-Notice that it still has some of the problems of other linear transformers, most importantly the information bottleneck due to linearity.
+In order to assess and compare the methods we just introduced, it is worth evaluating them on common tasks. Namely, we evaluate the test set BLEU score on the standard WMT14  English to German machine translation task \cite{bojar-EtAl:2014:W14-33} and accuracy on the Long Range Arena (LRA) benchmark \cite{tay2020long}, which is designed to assess the performance of
+models in handling lengthy context situations. Indeed, LRA includes a collection of classification tasks with sequences with up to $16k$ tokens, covering data types like text, images, natural language, and mathematical expressions. For the sake of this analysis, only the average performance on LRA will be included.
+
+\begin{table}[ht!]
+\centering
+\begin{tabular}{l c c} 
+\hline
+  Method & WMT14 En-De & LRA (Avg.) \\
+\hline
+    Vanilla Trans. & 28.4 & 53.66 \\
+    Linear Trans. & 26.8  & 50.46 \\
+    RFA & 28.2 & - \\
+    Performers & 27.7 & 51.18 \\
+    DFPF & 27.1 & - \\
+    RWKV & - &  72.07 \\
+\hline
+\end{tabular}
+\caption{Results of benchmarks for linear attention variants}
+\label{table:linear}
+\end{table}
+
+These results are provided by the authors and involve the selection of suitable hyperparameters, most notably the choice of $c$, the size of the embedding done through the feature map.
+
+It is also worth remarking that although there are no unified comparisons of wall clock time between the different approaches, each paper claims to have obtained from two to thousands of times improvement to train for a fixed number of epochs. This highlights that the theoretical complexity improvement extends to practical scenarios. 
+
+\subsection{Remarks}
+
+Upon analyzing some of the main approaches to Linear Attention Transformers, we must also discuss their limitations. The benchmarks above show that these alternatives can obtain competitive performance on WMT14 and LRA, however, it seems like authors hand-pick tasks in which the approaches work well. As noted by a few surveys \cite{tay2022efficient}\cite{lin2021survey}, linear attention models struggle to be competitive all over the board, usually performing well only in specific setups. 
+
+Moreover, it is noted by \cite{tay2022efficient} that some models do not yield significant speed or memory improvements in the case of short sequence lengths. This is partially attributed to the usage of complex operations, such as sampling from a Gaussian Distribution, being used instead of highly hardware-optimized multiplications. One of the exceptions to this is the EcoFormer, as it combines the benefits of quantization and linear attention.
+
+It is important however to note that these analyses do not include RWKV, as it is very recent and requires further exploration.

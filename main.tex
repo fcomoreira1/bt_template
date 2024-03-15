@@ -1,14 +1,15 @@
 \documentclass[oneside, a4paper, onecolumn, 11pt]{article}
 
 % Change this: Customize the title, author, advisor, abstract
-\newcommand{\thesistitle}[0]{Efficient Transformers}
+\newcommand{\thesistitle}[0]{Advancements on Efficient Transformer Design}
 \newcommand{\authorname}[0]{Francisco Moreira Machado Neto}
 
 \newcommand{\supervisor}[0]{Dr. Van Minh Nguyen}
 \newcommand{\supervisorinstitution}[0]{Huawei Technologies}
 
 \newcommand{\abstracttext}[0]{%
-Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+The Transformer has been one of the major advancements in Machine Learning in recent years due to its flexibility and exceptional performance. 
+With its wide adoption in particular its role in making the rise of large models such as ChatGPT, reducing its computational complexity has become an important matter of interest for recent research. In this thesis report, we first survey the foundational concepts of Transformers, highlighting its attention mechanism, to establish a comprehensive understanding of the architecture. We then delve into approaches focused on improving the efficiency of the Transformer: Binarization and Linear Attention Transformers. First, we establish a general framework for these innovations. Second, we highlight some notable adaptations of these techniques. Finally, we discuss benchmarks and possible future research directions.
 }
 
 \usepackage[
@@ -26,13 +27,19 @@ Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor i
 \usepackage{url}
 \usepackage{graphicx}
 \usepackage{wrapfig}
+\usepackage{caption}
+\usepackage{subcaption}
+\DeclareCaptionLabelFormat{nocaption}{}
 \usepackage{enumerate}
 \usepackage{paralist}
 \usepackage{xspace}
 \usepackage{color}
 \usepackage{times}
+\usepackage{tikz}
+\usepackage{circuitikz}
+\usepackage{bbm}
 \usepackage[colorlinks,linkcolor=blue]{hyperref}
-\usepackage[colorinlistoftodos,prependcaption,textsize=normal]{todonotes}
+% \usepackage[colorinlistoftodos,prependcaption,textsize=normal]{todonotes}
 \usepackage{pdfpages}
 \usepackage{fancyhdr} %% For changing headers and footers
 
@@ -44,6 +51,19 @@ Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor i
 %% \date{}
 %% \author{\authorname}
 \newcommand{\softmax}{\text{Softmax}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\newcommand{\relu}{\text{ReLU}}
+\def\app#1#2{%
+  \mathrel{%
+    \setbox0=\hbox{$#1\sim$}%
+    \setbox2=\hbox{%
+      \rlap{\hbox{$#1\propto$}}%
+      \lower1.1\ht0\box0%
+    }%
+    \raise0.25\ht2\box2%
+  }%
+}
+\def\approxprop{\mathpalette\app\relax}
 
 \begin{document}
 
@@ -129,8 +149,9 @@ Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor i
 
 \input{sections/introduction}
 \input{sections/transformers}
+\input{sections/quantization}
 \input{sections/linear}
-
+\input{sections/conclusion}
 
 \newpage
 \bibliographystyle{plain}

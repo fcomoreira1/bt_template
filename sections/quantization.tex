@@ -1,0 +1,267 @@
+\newcommand{\sign}{\text{sign}}
+\newcommand{\bool}{\text{bool}}
+\section{Binarization}
+
+Quantization has received attention as one of the most promising techniques to reduce the model size of LLMs. Not only does this technique have very promising benefits, but also it has been greatly successful in some applications \cite{liu2020reactnet}\cite{rastegari2016xnornet}. Although the idea of reducing the bit-width of weights and/or activations is relatively simple, successfully implementing it is not as much. We are particularly interested in extreme quantization, i.e. binarization, as it not only promises a 32x times improvement in memory footprint but also enables the substitution of expensive floating point arithmetic with highly efficient binary operations. However, with its higher memory reduction and arithmetic cost benefits comes also a series of problems in representative capabilities and difficulty of optimization. In this section, we will establish the fundamentals of model binarization and highlight a few clever methods that were applied to Transformer-based LLMs.
+
+\begin{figure}[!ht]
+\centering
+\resizebox{0.8\textwidth}{!}{%
+\begin{circuitikz}
+\tikzstyle{every node}=[font=\normalsize]
+\draw  (2.5,17) circle (1.25cm);
+\node [font=\Large] at (5.5,17.3) {Pre-Train};
+\draw  (8.75,17) circle (1.25cm);
+\draw  (15,19.5) circle (1.25cm);
+\draw  (15,14.5) circle (1.25cm);
+\draw  (21.25,14.5) circle (1.25cm);
+\draw [short] (10,17) -- (11.25,19.5);
+\draw [short] (10,17) -- (11.25,14.5);
+\draw [->, >=Stealth] (11.25,19.5) -- (13.75,19.5);
+\draw [->, >=Stealth] (11.25,14.5) -- (13.75,14.5);
+\draw [->, >=Stealth] (16.25,14.5) -- (20,14.5);
+\draw [->, >=Stealth] (3.75,17) -- (7.5,17);
+\node [font=\Large] at (12.5,19.85) {Fine-Tune};
+\node [font=\Large] at (12.5,14.85) {Fine-Tune};
+\node [font=\Large] at (12.4,19.1) {QAT};
+\node [font=\Large] at (18,14.85) {PQT};
+\node [font=\LARGE] at (2.5,17) {$M_0^{FP}$};
+\node [font=\LARGE] at (8.7,17) {$M_1^{FP}$};
+\node [font=\LARGE] at (15,19.5) {$M_2^{B}$};
+\node [font=\LARGE] at (15,14.5) {$M_3^{FP}$};
+\node [font=\LARGE] at (21.3,14.5) {$M_4^{B}$};
+\end{circuitikz}
+}%
+\caption{Scheme of training procedure for QAT and PTQ. The FP superscript means the model is trained in full precision, while B means it is binarized.}
+\label{fig:quant_scheme}
+\end{figure}
+
+\newpage
+There are two main classes of quantization methods: 
+\begin{itemize}
+    \item \textbf{Post-Training Quantization (PTQ): } Consists of taking an already trained model and quantizing its weights as well as establishing a strategy for reducing the bit-width of input and activations on inference. These are generally more practical to use since they require less computational power and overall changes to the training pipeline.
+
+    \item \textbf{Quantization-Aware Training (QAT): } Consists of designing a new pipeline for training the model with quantization in mind. These have the potential for better performance, but come with the cost of additional training the models, making it a much more costly approach.    
+\end{itemize}
+
+Notably, when applying quantization to language models, both methods start from a pre-trained model, as indicated in figure \ref{fig:quant_scheme} by $M_1^{FP}$, to avoid the massive cost associated with training from these networks from scratch. The methods then differ starting from the fine-tuning process. In QAT, we fine-tune the model taking into consideration the quantization procedure. In PQT, we first fine-tune the model (or take a fully trained one) and then apply a quantization strategy for its weights and activations.
+
+\subsection{General Framework}
+% Up to my knowledge at the time of writing, the most relevant binary PTQ focuses on the BERT \cite{devlin2019bert} architecture, which is an encoder-only Transformer-based model, however, the techniques established can be leveraged with minor modifications to other types of Transformer.
+
+We will start by establishing a baseline approach, inspired by \cite{Qin2022bibert}, as it describes many common techniques for binary PTQ and QAT. Key to the formulation of binary networks is the $\sign(x)$ function, defined as
+\begin{equation}
+    \sign(x) = \begin{cases}
+        1, & \text{if } x \geq 0 \\
+        -1, & \text{otherwise}
+    \end{cases},
+\end{equation}
+for the forward pass, and the Straight-Through Estimator (STE)\cite{bengio2013estimating} for the backward pass. Indeed, as the name suggests, STE allows the full gradient to pass during the backpropagation with the identity function used to propagate the gradient. Notice that this function will be frequently used to bring activations and weights to $\{-1, 1\}$, the standard pair of numbers used for binarization.
+
+Moreover, we must establish how to binarize the pre-trained weights. As all weights of transformers come from linear fully connected layers, we can focus on this type of parameter. Given a full-precision weight matrix $W$, we would wish to find $W_B$ with values in $\{-1, 1\}$ and a scaling factor $\alpha \in \mathbb{R}^+$ to minimize the approximation error $\|XW - \alpha XW_B \|$ over all possible inputs $X$. The introduction of $\alpha$ as a full-precision scaling factor has the purpose of reducing drastically the quantization errors \cite{rastegari2016xnornet} while preserving the benefits of binary storage and efficient matrix multiplications with xnor and bitcount operations.
+
+This motivates us to solve the following optimization problem, as done by \cite{rastegari2016xnornet} 
+
+\begin{equation}
+\label{eq:optim_bin}
+    \min_{\alpha, W_B} \| W - \alpha W_B \|^2.
+\end{equation}
+
+We may assume for simplicity that both $W$ and $W_B$ are vectors on $\{-1, 1\}^k$ for some $k$ by flattening them out, as it does not change the optimization problem. With this, we can expand to get
+\begin{align}
+    \min_{\alpha, W_B} W^\top W - 2\alpha W^\top W_B + \alpha^2 W_B^\top W_B,
+\end{align}
+which in turn we can reduce as $W_B^\top W_B = n$ and $W^\top W$ is a fixed constant, so the problem becomes
+\begin{equation}
+    \max_{\alpha, W_B} 2\alpha W^\top W_B - \alpha^2 n,
+\end{equation}
+in which the optimal solution for $W_B$ can achieved independently of $\alpha$ (as it is positive) by 
+\begin{equation}
+    W_B^* = \max_{W_B} W^\top W_B = \sign(W).
+\end{equation}
+
+Finally, we obtain $\alpha^*$ as 
+\begin{equation}
+    \alpha = \cfrac{W^\top W_B^*}{n} = \cfrac{W^\top \sign(W)}{n} = \cfrac{\sum_{i=1}^n |W_i|}{n},
+\end{equation}
+so we have a fixed formula to compute the optimal binary approximation with a scaling factor given the pre-trained weights. 
+
+Moreover, before introducing what is called the bi-linear layer, we discuss yet another standard optimization when doing quantization. It is common practice to normalize the weights to zero-mean before applying the quantization function, for retaining representation information \cite{qin2020forward}. We therefore use the same identities as before for $\alpha$ and modify $W_B$ by taking $W' = W - \mu(W)$, with $\mu$ being the mean function.
+
+Now we are ready to define a binary alternative to a pre-trained linear layer as:
+\begin{equation}
+    \text{bi-linear}(X) = \frac{1}{n}\|W\|_{\ell_1} (\sign(X) \otimes \sign(W')).
+\end{equation}
+
+Notice that here we binarize $X$ by just the sign activation for a baseline approach (indeed, one can prove that by assuming the data has a centered Gaussian distribution, the sign function maximizes the entropy). Moreover, we denote the matrix multiplication by $\otimes$ as this is an operation that can be fully computed through efficient binary operations.
+
+\vspace{1em}
+
+Now to define a fully binary transformer block, it suffices to substitute the linear embedding to obtain $Q, K,$ and $V$ for the bi-linear layer, as well as the position-wise feed-forward network. We then obtain 
+\begin{equation}
+   Q_B = \sign(Q), Q_K = \sign(K), A = \frac{1}{\sqrt{d_k}}\left( Q_B \otimes K_B^\top \right), 
+\end{equation}
+and ultimately the result of self-attention can be obtained by concatenating $\sign(\softmax(A))$. Notice however that as softmax is a positive function, this last term will result in all entries being $1$, thus we introduce learnable shift parameters $\tau_i$ and rewrite the output of multi-head attention as:
+\begin{equation}
+    \text{MHA}(X) = \text{Concat}(\sign(\softmax(A_1) - \tau_1), \ldots, \sign(\softmax(A_h) - \tau_h)).
+\end{equation}
+
+
+\vspace{1em}
+
+The final key approach to quantization is \textit{knowledge distillation} (KD)\cite{hinton2015distilling}. The technique consists of training a student network to mimic the behavior of a teacher network, usually to compress or transfer knowledge to more efficient networks. This is achieved by adding an extra term to the loss function that incentivizes mimicking a certain behavior of the teacher network. Two main classes of KD methods can be applied to quantization:
+
+\begin{itemize}
+    \item \textbf{Logit-based KD:} This method adds an objective for the student model to match the output probability distribution of the teacher one. To illustrate the objective of this method, we denote the logits output of the teacher and student network as $z^s, z^t$, i.e., the outputs before applying a softmax layer. Now let $p^s = \softmax(z^s), p^t = \softmax(z^t)$, then our objective function is the KL divergence between the teacher and student probability distribution as
+    \begin{equation}
+        \mathcal{L}_{logits} = KL ( p^t || p^s).
+    \end{equation}
+
+    \item \textbf{Hint-based KD:} This method attributes as an objective to match an intermediate feature of the teacher network. This can be formulated by considering a corresponding intermediate feature $F^s, F^t$ of the student and teacher networks, respectively, and considering a certain distance measure $\mathcal{D}$, which is taken as the mean squared error (MSE) unless specified otherwise, and finally
+    \begin{equation}
+        \mathcal{L}_{hint} = \mathcal{D}(F^s, F^t).
+    \end{equation}
+\end{itemize}
+
+Different approaches to binarization combine these two modes of distillation differently. KD is considered to be an essential enhancement to alleviate the representational limitations and performance drop of extreme bit-width settings. 
+
+For a baseline, we consider a distillation that takes the cross entropy of the output of the teacher and student logits $z^t, z^s$, respectively, which we refer to as $\mathcal{L}_{cross}$, as well as three hint-based KD with intermediate features being, for the $i-th$ layer, the matrix $A$, the output of the MHA, and the hidden representations $Y$ which are of the Transformer block. These are represented as $\mathcal{L}^i_{A}, \mathcal{L}^i_{\text{MHA}}, $ and $ \mathcal{L}^i_{Y},$ respectively.
+If we pick a design of $N$ layers of Transformer blocks, the total loss can be described as
+\begin{equation}
+    \mathcal{L}_{distil} := \mathcal{L}_{cross} + \sum_{i=1}^N \mathcal{L}^i_{A} + \mathcal{L}^i_{\text{MHA}} + \mathcal{L}^i_{Y}.
+\end{equation}
+
+\subsection{Related Progress}
+
+With a general framework established, we can describe the key improvements made to it. We will first explore two QAT approaches to BERT as a base model:  BiBERT \cite{Qin2022bibert} and BiT \cite{liu2022bit}.
+
+BiBERT suggests Bi-Attention as a replacement for the binarization for the attention mechanisms. The design choices are based on maximizing the information entropy of the binarized representations. The authors establish the statistical hardness of determining a parameter $\tau$ to maximize the information entropy $\mathcal{H}(\sign(\softmax(A) - \tau))$, which is q key parameter for the model's performance. Under assumptions of independence of the rows of $A$, they conclude that is approximately optimal to remove the softmax of the attention head and compensate for this removal by using $\bool(A)$ as the activation, where $\bool(x)$ is defined analogously to $\sign$ by attributing $1$ if $x \geq 0$ and $0$ otherwise. The Bi-attention can then be formulated as
+\begin{equation}
+    \text{Bi-Attention}(Q_B, K_B, V_B) = \bool \left( \frac{1}{\sqrt{d_k}} (Q_B K_B^\top )\right) V_B.
+\end{equation}
+
+BiBERT also includes a mechanism to tackle the optimization problems that arise from baseline distillation and binarization. The phenomenon of direction mismatch is a common problem for quantization problems, which consists of the optimization process resulting in undesired behavior by being insufficient for convergence or even harmful. This can be caused by the low precision of the parameters preventing the desired optimization directions. Upon studying how this mismatch relates to the bit-width on a theoretical scenario of Gaussian distributed inputs, the authors design a Direction Matching Distillation (DMD) scheme to remediate the mismatch.
+
+The most severe direction mismatch occurs when computing the approximation error of $Q_BK_B^\top$ with relation to $Q K^\top$ (which is included in the $\mathcal{L}_A$), which is believed to be caused by the multiplication of two binarized activations. To remediate, the authors propose to distill directly the $Q$, $K$, and $V$, with the latter being motivated by a similar argument with relation to $\mathcal{L}_\text{MHA}$. To enable the comparison between $Q, K$, and $V$ and the binary counterparts, one first constructs similarity matrices given by 
+\begin{equation}
+    F_Q = \frac{QQ^\top}{\|QQ^\top\|},
+    F_K = \frac{KK^\top}{\|KK^\top\|},
+    F_V = \frac{VV^\top}{\|VV^\top\|},
+\end{equation}
+and similarly defined binary counterparts named $F_Q^B, F_K^B,$ and $F_V^B$. We finally introduce $\mathcal{L}_Q = \|F_Q - F_Q^B\|$ and analogously for the others to obtain
+\begin{equation}
+    \mathcal{L}_{distil} = \mathcal{L}_{cross} + \sum_{i=1}^N \mathcal{L}_Q^i + \mathcal{L}_K^i + \mathcal{L}_V^i + \mathcal{L}^i_Y.
+\end{equation}
+
+\vspace{1em}
+
+BiT, on the other hand, makes the framework more flexible by allowing some intermediate features to have values in $\{0, 1\}^k$ rather than $\{-1, 1\}^k$. The authors confirm through ablation studies that when the full-precision network goes through positive activation functions, such as ReLU or Softmax, the binary counterpart obtains better performance when the binarization space is $\{0, 1\}^k$. Otherwise, if the hidden representation takes values in $\mathbb{R}^k$, the binarization space remains $\{-1, 1\}^k$ with the $\sign$ function. Indeed, if we assume such a space we can solve a similar optimization problem to eq. (\ref{eq:optim_bin}) and obtain
+\begin{equation}
+    X_B^* = \lfloor \text{Clip}(X - \mu(X), 0, 1) \rceil, \;\;\; \alpha^* = \frac{\| W \cdot \mathbbm{1}_{\{W \geq 0.5\}} \|_{\ell_1}}{|\{X \geq 0.5\}|},
+\end{equation}
+where $\text{Clip}(x, a, b) = \max(a, \min(b, x))$, $\lfloor \cdot \rceil$ is the nearest integer approximation, $\mathbbm{1}_{\{X \geq 0.5\}}$ is a vector containing $1$ if the equivalent entries of $X$ are greater than or equal to $0.5$ and $0$ otherwise, and $|\cdot|$ is the set cardinality function.
+
+Moreover, they modify this binarization approach to be even more flexible by introducing a learnable threshold $\beta$ to the $\sign$ and $\text{Clip}$ activations. These are formulated as
+\begin{equation}
+    X_B^+ = \lfloor \text{Clip}( \frac{X^+ - \beta}{\alpha}, 0, 1) \rceil, \;\;\; X_B = \sign(X - \beta),
+\end{equation}
+in which we denote with the $+$ superscript the positive hidden representations. This approach also makes the $\alpha$ a learnable parameter which is initialized as $\alpha^*$.
+
+Additionally, BiT includes two key modifications to the distillation process. First, the distillation objective is simplified to $\mathcal{L}_{distil} = \mathcal{L}_{cross} + \sum_{i=1}^N \mathcal{L}^i_{Y}$. Second, the distillation follows a multi-step approach, in which we gradually reduce the quantization level to finally obtain a binarized model, which aims to mitigate issues due to the drastic difference between high-precision teacher and low-precision models. Formally, the multi-step distillation follows a schedule $Q = \{ (b^1_w, b_a^1), \ldots (b^l_w, b^l_a) \}$ where $(b^i_w, b^i_a)$ represents that at the $i$-th step, we have a model with weights in bit-width $b^i_w$ and activations in bit-width $b^i_a$. By default, the schedule is taken as $Q = \{(32, 32), (1, 2), (1, 1)\}$.
+
+\vspace{1em}
+
+Now that we defined how the forward and backward pass work for BiBERT and BiT, it remains to discuss how the parameter update is made. For both methods, as well as many QAT variants, during the fine-tuning stage, the full precision parameters are still the ones being stored. The updates are then made to these with conventional optimizers, with the binary representation being obtained via the methods we established before. At the end of this process, only the binary representations are stored for the fine-tuned model. ,
+
+
+\vspace{1em}
+
+Now we explore one very recent binary PTQ method for LLMs: BiLLM \cite{huang2024billm}. In this constrained setting, the authors opt to binarize only the weights of LLMs, keeping the activations in their original precision, which is generally 16 bits.
+With no usage of fine-tuning, the authors need to obtain a better understanding of the statistical properties of the weights and extract suitable properties from them. 
+This is exactly what the authors use as a reference for this novel approach. Upon studying the distribution and Hessian matrix of weights, the authors make two key observations: 
+
+\begin{enumerate}
+    \item The Hessian matrix has a long-tail distribution. This is interpreted as a minor part of the weights having major significance for the LLM.
+    \item The magnitude of the weights has a Gaussian-like distribution. This poses a major problem, as binarization results in severe quantization errors for such distributions \cite{jacob2017quantization}.
+\end{enumerate}
+   
+To take into account point 1. which we just discussed, the authors propose to double the bit-width of what they call "salient" weights, which conceptually are those that are the most relevant to the network. Like that, these would be better approximated in the binarized network. For each layer, we deal with weights separately as follows, we first define the salience of each weight as (assume flattened weights for this definition)
+\begin{equation}
+s_i = \cfrac{w_i^2}{\mathbf{[H^{-1}]}^2_{ii}}.
+\end{equation}
+
+Now let us call $S$ the salience matrix, with the same dimensions as $W$, the weight matrix (by folding). For a structured choice of salient weights, we pick full columns to be the salient ones. From now on, let us assume that the columns of $W$ are ordered based on the sum of the columns of $S$. By denoting $W_{sal}, W_{uns}$ to be the weights of salient and non-salient columns, respectively, we can rewrite eq. (\ref{eq:optim_bin}) as
+\begin{equation}
+\label{eq:salient_optim}
+    \min_{W_{sal}^B, W_{uns}^B, \alpha_{sal}, \alpha_{uns}} \|W - \text{Concat}(\alpha_{sal} W_{sal}^B, \alpha_{uns}W_{uns}^B) \|^2,
+\end{equation}
+with the $B$ superscript meaning the binary approximation, as usual. We can solve this in the same way as we did for eq. (\ref{eq:optim_bin}) by solving for the two sets of columns separately. Now it just remains to choose how many columns are salient. This is done by solving eq. (\ref{eq:salient_optim}) with the number of columns starting from $1$ and up to $k$, which is a hyperparameter, and picking the one with the lowest approximation error.
+
+Upon selecting the salient columns, the authors opt to approximate them with double the bit-width but still with the binarization approach in mind. Indeed, instead of solving equation $(\ref{eq:optim_bin})$ for the salient columns, the residual approximation optimization optimizes in the following way
+\begin{equation}
+    \alpha_o^*, W_o^* = \argmin_{\alpha_o, W_0} \|W_{sal}^{FP} - \alpha_o W_o\|^2, \;\;\;  \alpha_r^*, W_r^* = \argmin_{\alpha_r, W_r} \|(W_{sal}^{FP} - \alpha_o W_o) - \alpha_r W_r\|^2.
+\end{equation}
+
+This results in the approximation for the full precision salient columns of $W$ as $W_{sal}^{FP} \approx \alpha_o W_o + \alpha_r W_r$. 
+
+\vspace{0.5em}
+
+For observation 2. as indicated above, the authors propose once again to split the non-salient weights into two sets that will be binarized separately, however this time both with bit-width 1. By identifying the Gaussian-like distribution of weights, we hope to divide the non-salient weights into two groups depending on their values. We define $I_c = [-p, p]$ to be the interval defining the group of \textit{concentrated} weights, and $I_c = I_s^{C}$ (the complementary interval) to define the group of \textit{sparse} weights. 
+
+With this division, we can rewrite the optimization problem to find (again by assuming proper reordering)
+\begin{equation}
+   \alpha_c^*, \alpha_s^*, W_c^*, W_s^* =   \argmin_{ \alpha_c, \alpha_s, W_c, W_s} \| W_{uns}^{FP}- \text{Concat}(\alpha_cW_c, \alpha_sW_s) \|,
+\end{equation}
+which we know how to solve as discussed before. Therefore it only remains to choose an optimal $p^*$ to minimize the quantization error. The proposed process to find $p^*$ is by conducting a grid search on $[0, 9]$. 
+
+\subsection{Benchmarks and Discussion}
+
+As both BiBERT and BiT adapt the BERT base architecture, we can make a straightforward comparison of them. Moreover, BERT is well-suited for classification tasks, so generally, it is tested through classification tasks. We include here the classification accuracy performance on the GLUE \cite{wang2019glue} benchmark tasks, considering the results of the fully binarized BiT.
+
+\begin{table}[ht!]
+\small
+\centering
+\begin{tabular}{l c c c c c c c c c c} 
+\hline
+  Method & Size (Mb) & MNLI m/mm & QQP & QNLI & SST-2 & CoLA & STS-B & MPRC & RTE & Avg. \\
+\hline
+    BERT base & 418 & 84.9/84.5 & 91.4 & 92.1 & 93.2 & 59.7 & 90.1 &  86.3 & 72.2 & 83.9\\
+    BiBERT & 13.4 &  66.1/67.5 & 84.8 & 76.0 & 90.9 & 37.8 & 56.7 & 78.8 & 61.0 & 68.8 \\
+    BiT & 13.4 & 79.5/79.4 & 85.4 & 86.5 & 92.3 & 38.2 & 84.2 & 88.0 & 69.7 & 78.0  \\
+\hline
+\end{tabular}
+\caption{Comparison of BERT binarization methods on the GLUE benchmark as reported by \cite{liu2022bit}}
+\label{table:bert}
+\end{table}
+
+From table \ref{table:bert}, we can observe not only that BiT can provide a relatively competitive alternative to full-precision BERT, but also that even by introducing a few extra parameters $(\alpha, \beta)$, the size of the model still reduces by approximately 31.2x. Despite the promising results, BiT still presents a drop of several points for selected tasks, which may be prohibitive for practical applications. It remains an open problem to investigate such approaches in more general settings other than BERT-based classification models.
+
+\vspace{1em}
+
+In contrast with the classification benchmarks for the BERT-based quantization, BiLLM focuses on testing the perplexity of LLM's outputs before and after binarization. The perplexity measure is considered a key indicator of LLM performance and capabilities. We include below the perplexity results as well as the average bit-width of the weights
+for the WikiText2 \cite{merity2016pointer} dataset using two different base networks, LLaMA2\cite{touvron2023llama} and OPT \cite{zhang2022opt}.
+\vspace{0.5em}
+
+\begin{table}[ht!]
+\small
+\centering
+\begin{tabular}{l c c c c} 
+\hline
+  Method & Bit-Width & 6.7B/7B* & 13B & 66B/70B* \\
+\hline
+    OPT Full Precision & 16.0 & 10.86 & 10.13  & 9.34 \\
+    OPT BiLLM & 1.11 & 35.36 & 18.82  & 12.06 \\
+\hline
+    LLaMA2 Full Precision & 16.0 & 5.47 & 3.88 & 3.32 \\
+    LLaMA2 BiLLM & 1.08 & 32.48 & 16.77 & 8.41 \\
+\hline
+\end{tabular}
+\caption{Perplexity results on WikiText2 datasets with different model sizes. *: The first size corresponds to OPT and the second to LLaMA2. Results from \cite{huang2024billm}.}
+\label{table:billm}
+\end{table}
+
+Although the result shows an increase of a few points (lower perplexity is better), it is interesting to observe that it increases very well with the size of the network, indicating a positive scaling law. Although not included in this report, the authors obtained better results through their method than any other previous PTQ for LLM, establishing a new state-of-the-art. 
+
+Notably, the experiments were conducted on a single 80GB NVIDIA A100, with which the full quantization of 7B LLaMA2 was completed in under 30 minutes.
+
+Finally, it would be interesting to study how this method would perform when binarizing also the activations, as the QAT methods above do. Without the quantized activations, some of the arithmetic benefits cited above do not hold and restrict this method mostly to a memory-saving alternative.
