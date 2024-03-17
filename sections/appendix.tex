@@ -1,4 +1,4 @@
-\section{Transformer Autoregressive Inference Optimization}
+\section{Transformer Inference Optimization}
 \label{sec:appendix}
 
 As discussed in section \ref{sec:transformers}, directly following the Vanilla Transformer for autoregressive inference can be asymptotically very slow. During inference, we feed the first $M$ tokens of the currently generated output sequence to obtain a probability distribution over the next token, which is used to decide on the $M+1$-th token of the sequence. In this fashion, as every pass-through on a decoder block has $O(M^2)$ complexity, we get a total computational complexity of $O(M^3)$, which needless to say is undesirable.
@@ -68,4 +68,4 @@ and analogous results hold for $K_{M+1}, V_{M+1}$. For simplicity, let $q_{M+1}^
 
 Therefore, having computed $Y_M$ before, we only need to compute the bottom term of the expression above. Moreover, we already have computed $K_M, V_M$, so we first compute $q_{M+1}, k_{M+1}, v_{M+1}$ in $O(dd_k)$ each, then having all the values computed, it remains to compute the matrix multiplications. $q_{M+1}^\top K_{M+1}^\top$ takes $O(Md_k)$, the softmax $O(Md_k)$ and finally, multiplying with $V_{M+1}$ requires $O(Md_k)$ operations too, resulting in a final complexity of $O((M+d)d_k)$ operations to pass through the masked self-attention block. 
 
-Very similarly, we can get that the output of the encoder-decoder attention can be computed in linear time with respect to $M$ having the previous values computed. Finally, as stated in table \ref{table:1}, the complexity of $FFN$ is already linear on $M$, therefore we can do a full pass on a decoder block during inference with $O(M)$ computations, reducing the total requirements of autoregressive inference to $O(M^2)$.y
+Very similarly, we can get that the output of the encoder-decoder attention can be computed in linear time with respect to $M$ having the previous values computed. Finally, as stated in table \ref{table:1}, the complexity of $FFN$ is already linear on $M$, therefore we can do a full pass on a decoder block during inference with $O(M)$ computations, reducing the total requirements of autoregressive inference to $O(M^2)$.
