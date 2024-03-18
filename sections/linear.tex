@@ -49,12 +49,12 @@ To my knowledge, the first attempt to use Linear Attention Transformers was prop
  The authors of Random Feature Attention (RFA) \cite{peng2021random} on the other hand propose a more sophisticated map that has a closer relation to the original function.  They do so by first replacing the $\sqrt{d_k}$ term on the denominator of the softmax with a learnable parameter $\sigma$ and rewriting 
  \begin{equation}
  \label{eq:exp-rewrite}
-     \exp\left(x^\top y / \sigma^2 \right) = \exp\left(\|x\|/2\sigma^2 + \|y\|/2\sigma^2\right) \exp\left(-\|x - y\|/2\sigma^2\right)
+     \exp\left(x^\top y / \sigma^2 \right) = \exp\left(\|x\|^2/2\sigma^2 + \|y\|^2/2\sigma^2\right) \exp\left(-\|x - y\|^2/2\sigma^2\right),
  \end{equation}
- so through by normalizing the keys and queries to a fixed norm, they can turn the attention on approximating $\exp\left(-\|x - y\|/\sigma^2\right)$ instead. For that, they propose the randomized map
+ so through by normalizing the keys and queries to a fixed norm, they can turn the attention on approximating $\exp\left(-\|x - y\|^2/\sigma^2\right)$ instead. For that, they propose the randomized map
 \begin{equation}
 \label{eq:rfa}
-\phi(x) = \sqrt{1/D} \Bigl[ \sin(w_1 \cdot x), \ldots, \sin(w_D \cdot x), \cos(w_1 \cdot x), \ldots \cos(w_D \cdot x) \Bigr]^\top
+\phi(x) = \sqrt{1/D} \Bigl[ \sin(w_1 \cdot x), \ldots, \sin(w_D \cdot x), \cos(w_1 \cdot x), \ldots \cos(w_D \cdot x) \Bigr]^\top,
 \end{equation}
 for $d_k$-dimensional random vectors $w_i \sim \mathcal{N}(0, \sigma^2 I_{d_k}) $ and hyperparameter $D$ ($c = 2D$). Indeed, $\mathbb{E}[\phi(x) \phi(y)^T] = \exp(- \| x - y \|^2 / 2\sigma^2)$ and the variance of this estimation is inversely proportional to $D$ as established by \cite{yu2016orthogonal}. Therefore we can establish that $\exp\left(x^\top y / \sigma^2\right) \approxprop \phi(x)\phi(y)^\top$.
 
@@ -66,8 +66,8 @@ Another approach that is very similar to RFA is Performers \cite{choromanski2022
 \begin{equation}
 \label{eq:performers}
     \begin{split}
-        \phi_1(x)&= \exp(-\|x\|^2/2)(\exp(w_1 \cdot x) + \ldots + \exp(w_m \cdot x)) \\
-        \phi_2(x)&= \frac{1}{\sqrt{2}}\exp(-\|x\|^2/2)(\sum_{i=1}^m \exp(w_i \cdot x) + \exp(-w_i \cdot x))
+        \phi_1(x)&= \exp(-\|x\|^2/2)(\exp(w_1 \cdot x) + \ldots + \exp(w_m \cdot x)), \\
+        \phi_2(x)&= \frac{1}{\sqrt{2}}\exp(-\|x\|^2/2)(\sum_{i=1}^m \exp(w_i \cdot x) + \exp(-w_i \cdot x)),
     \end{split}
 \end{equation} 
 with $w_i$ being sampled either from $\mathcal{N}(0, I_{d_k})$ or to a uniform distribution over the sphere of radius $\sqrt{d_k}$ in $\mathbb{R}^d_k$. The key differences to RFA are the positiveness of the entries of the map, helping with numerical stability on the denominator of eq. (\ref{eq:approx}) and
@@ -109,7 +109,7 @@ $$
 $$
 with $w_{t, i} = -(t - i - 1)w$ for $i \leq t - 1$ and $w_{t, t} = u$, where $w$ represents a positional weight decay ($w \in \mathbb{R}_{\geq 0}^d$) and $u$ is a separate vector that attends exclusively to the current token. Heuristically, by replacing $Q$ with $W$, we establish a linear measure for similarity.
 
-The authors go beyond adapting just the attention matrix, but propose a major redesign of the architecture as follows ($\cdot$ is the Hadarmard product):
+The authors go beyond adapting just the attention matrix, but propose a major redesign of the architecture as follows ($\odot$ is the Hadarmard product):
 \begin{itemize}
     \item \textbf{Time Mix Block:} This block is analogous to the attention block of vanilla Transformers. It can be expressed by 
     \begin{align*}

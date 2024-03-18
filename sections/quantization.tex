@@ -41,10 +41,10 @@ There are two main classes of quantization methods:
 \begin{itemize}
     \item \textbf{Post-Training Quantization (PTQ): } Consists of taking an already trained model and quantizing its weights as well as establishing a strategy for reducing the bit-width of input and activations on inference. These are generally more practical to use since they require less computational power and overall changes to the training pipeline.
 
-    \item \textbf{Quantization-Aware Training (QAT): } Consists of designing a new pipeline for training the model with quantization in mind. These have the potential for better performance, but come with the cost of additional training the models, making it a much more costly approach.    
+    \item \textbf{Quantization-Aware Training (QAT): } Consists of designing a new pipeline for training the model with quantization in mind. These have the potential for better performance but come with the cost of additional training of the models, making it a much more costly approach.    
 \end{itemize}
 
-Notably, when applying quantization to language models, both methods start from a pre-trained model, as indicated in figure \ref{fig:quant_scheme} by $M_1^{FP}$, to avoid the massive cost associated with training from these networks from scratch. The methods then differ starting from the fine-tuning process. In QAT, we fine-tune the model taking into consideration the quantization procedure. In PQT, we first fine-tune the model (or take a fully trained one) and then apply a quantization strategy for its weights and activations.
+Notably, when applying quantization to language models, both methods start from a pre-trained model, as indicated in figure \ref{fig:quant_scheme} by $M_1^{FP}$, to avoid the massive cost associated with training these networks from scratch. The methods then differ starting from the fine-tuning process. In QAT, we fine-tune the model taking into consideration the quantization procedure. In PQT, we first fine-tune the model (or take a fully trained one) and then apply a quantization strategy for its weights and activations.
 
 \subsection{General Framework}
 % Up to my knowledge at the time of writing, the most relevant binary PTQ focuses on the BERT \cite{devlin2019bert} architecture, which is an encoder-only Transformer-based model, however, the techniques established can be leveraged with minor modifications to other types of Transformer.
@@ -67,7 +67,7 @@ This motivates us to solve the following optimization problem, as done by \cite{
     \min_{\alpha, W_B} \| W - \alpha W_B \|^2.
 \end{equation}
 
-We may assume for simplicity that both $W$ and $W_B$ are vectors on $\{-1, 1\}^k$ for some $k$ by flattening them out, as it does not change the optimization problem. With this, we can expand to get
+We may assume for simplicity that $W$ and $W_B$ are vectors on $\mathbb{R}^k, \{-1, 1\}^k$, respectively, for some $k$ by flattening them out, as it does not change the optimization problem. With this, we can expand to get
 \begin{align}
     \min_{\alpha, W_B} W^\top W - 2\alpha W^\top W_B + \alpha^2 W_B^\top W_B,
 \end{align}
@@ -99,11 +99,11 @@ Notice that here we binarize $X$ by just the sign activation for a baseline appr
 
 Now to define a fully binary transformer block, it suffices to substitute the linear embedding to obtain $Q, K,$ and $V$ for the bi-linear layer, as well as the position-wise feed-forward network. We then obtain 
 \begin{equation}
-   Q_B = \sign(Q), Q_K = \sign(K), A = \frac{1}{\sqrt{d_k}}\left( Q_B \otimes K_B^\top \right), 
+   Q_B = \sign(Q), K_B = \sign(K), A' = \frac{1}{\sqrt{d_k}}\left( Q_B \otimes K_B^\top \right), 
 \end{equation}
 and ultimately the result of self-attention can be obtained by concatenating $\sign(\softmax(A))$. Notice however that as softmax is a positive function, this last term will result in all entries being $1$, thus we introduce learnable shift parameters $\tau_i$ and rewrite the output of multi-head attention as:
 \begin{equation}
-    \text{MHA}(X) = \text{Concat}(\sign(\softmax(A_1) - \tau_1), \ldots, \sign(\softmax(A_h) - \tau_h)).
+    \text{MHA}(X) = \text{Concat}(\sign(\softmax(A'_1) - \tau_1), \ldots, \sign(\softmax(A'_h) - \tau_h)).
 \end{equation}
 
 
@@ -125,8 +125,8 @@ The final key approach to quantization is \textit{knowledge distillation} (KD)\c
 
 Different approaches to binarization combine these two modes of distillation differently. KD is considered to be an essential enhancement to alleviate the representational limitations and performance drop of extreme bit-width settings. 
 
-For a baseline, we consider a distillation that takes the cross entropy of the output of the teacher and student logits $z^t, z^s$, respectively, which we refer to as $\mathcal{L}_{cross}$, as well as three hint-based KD with intermediate features being, for the $i-th$ layer, the matrix $A$, the output of the MHA, and the hidden representations $Y$ which are of the Transformer block. These are represented as $\mathcal{L}^i_{A}, \mathcal{L}^i_{\text{MHA}}, $ and $ \mathcal{L}^i_{Y},$ respectively.
-If we pick a design of $N$ layers of Transformer blocks, the total loss can be described as
+For the purposes of this report, KD is only used for encoder-only architectures, so we establish a baseline distillation objective with this in mind, from which the other methods will be derived. For it, we consider a distillation that takes the cross entropy of the output of the teacher and student logits $z^t, z^s$, respectively, which we refer to as $\mathcal{L}_{cross}$, as well as three hint-based KD with intermediate features being, for the $i-th$ layer, the matrix $A$, the output of the MHA, and the hidden representations $Y$ which are of the Encoder block. These are represented as $\mathcal{L}^i_{A}, \mathcal{L}^i_{\text{MHA}}, $ and $ \mathcal{L}^i_{Y},$ respectively.
+If we pick a design of $N$ layers of blocks, the total loss can be described as
 \begin{equation}
     \mathcal{L}_{distil} := \mathcal{L}_{cross} + \sum_{i=1}^N \mathcal{L}^i_{A} + \mathcal{L}^i_{\text{MHA}} + \mathcal{L}^i_{Y}.
 \end{equation}
@@ -135,7 +135,7 @@ If we pick a design of $N$ layers of Transformer blocks, the total loss can be d
 
 With a general framework established, we can describe the key improvements made to it. We will first explore two QAT approaches to BERT as a base model:  BiBERT \cite{Qin2022bibert} and BiT \cite{liu2022bit}.
 
-BiBERT suggests Bi-Attention as a replacement for the binarization for the attention mechanisms. The design choices are based on maximizing the information entropy of the binarized representations. The authors establish the statistical hardness of determining a parameter $\tau$ to maximize the information entropy $\mathcal{H}(\sign(\softmax(A) - \tau))$, which is q key parameter for the model's performance. Under assumptions of independence of the rows of $A$, they conclude that is approximately optimal to remove the softmax of the attention head and compensate for this removal by using $\bool(A)$ as the activation, where $\bool(x)$ is defined analogously to $\sign$ by attributing $1$ if $x \geq 0$ and $0$ otherwise. The Bi-attention can then be formulated as
+BiBERT suggests Bi-Attention as a replacement for the binarization for the attention mechanisms. The design choices are based on maximizing the information entropy of the binarized representations. The authors establish the statistical hardness of determining a parameter $\tau$ to maximize the information entropy $\mathcal{H}(\sign(\softmax(A) - \tau))$, which is a key parameter for the model's performance. Under assumptions of independence of the rows of $A$, they conclude that is approximately optimal to remove the softmax of the attention head and compensate for this removal by using $\bool(A)$ as the activation, where $\bool(x)$ is defined analogously to $\sign$ by attributing $1$ if $x \geq 0$ and $0$ otherwise. The Bi-attention can then be formulated as
 \begin{equation}
     \text{Bi-Attention}(Q_B, K_B, V_B) = \bool \left( \frac{1}{\sqrt{d_k}} (Q_B K_B^\top )\right) V_B.
 \end{equation}
@@ -171,12 +171,12 @@ Additionally, BiT includes two key modifications to the distillation process. Fi
 
 \vspace{1em}
 
-Now that we defined how the forward and backward pass work for BiBERT and BiT, it remains to discuss how the parameter update is made. For both methods, as well as many QAT variants, during the fine-tuning stage, the full precision parameters are still the ones being stored. The updates are then made to these with conventional optimizers, with the binary representation being obtained via the methods we established before. At the end of this process, only the binary representations are stored for the fine-tuned model. ,
+Now that we defined how the forward and backward pass work for BiBERT and BiT, it remains to discuss how the parameter update is made. For both methods, as well as many QAT variants, during the fine-tuning stage, the full precision parameters are still the ones being stored. The updates are then made to these with conventional optimizers, with the binary representation being obtained via the methods we established before. At the end of this process, only the binary representations are stored for the fine-tuned model.
 
 
 \vspace{1em}
 
-Now we explore one very recent binary PTQ method for LLMs: BiLLM \cite{huang2024billm}. In this constrained setting, the authors opt to binarize only the weights of LLMs, keeping the activations in their original precision, which is generally 16 bits.
+We now explore one very recent binary PTQ method for LLMs: BiLLM \cite{huang2024billm}. In this constrained setting, the authors opt to binarize only the weights of LLMs, keeping the activations in their original precision, which is generally 16 bits.
 With no usage of fine-tuning, the authors need to obtain a better understanding of the statistical properties of the weights and extract suitable properties from them. 
 This is exactly what the authors use as a reference for this novel approach. Upon studying the distribution and Hessian matrix of weights, the authors make two key observations: 
 
